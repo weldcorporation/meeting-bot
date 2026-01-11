@@ -1,13 +1,33 @@
 import { Logger } from 'winston';
 import { KnownError } from '../error';
 import { getErrorType } from '../util/logger';
+import { BotStatus } from '../types';
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Job state for tracking current session status
+ */
+export interface JobState {
+  sessionId: string;
+  botId?: string;
+  status: BotStatus;
+  statusMessage?: string;
+  provider: 'google' | 'microsoft' | 'zoom';
+  meetingUrl: string;
+  startedAt: string;
+  joinedAt?: string;
+  recordingStartedAt?: string;
+  participantCount?: number;
+  recordingUrl?: string;
+  error?: { code: string; message: string };
+}
+
 export class JobStore {
   private isRunning: boolean = false;
   private shutdownRequested: boolean = false;
+  private currentJob: JobState | null = null;
 
   async addJob<T>(
     task: () => Promise<T>, 
@@ -72,6 +92,85 @@ export class JobStore {
 
   isBusy(): boolean {
     return this.isRunning;
+  }
+
+  /**
+   * Get the current job state
+   */
+  getCurrentJob(): JobState | null {
+    return this.currentJob;
+  }
+
+  /**
+   * Initialize a new job with initial state
+   */
+  initializeJob(params: {
+    sessionId: string;
+    botId?: string;
+    provider: 'google' | 'microsoft' | 'zoom';
+    meetingUrl: string;
+  }): void {
+    this.currentJob = {
+      sessionId: params.sessionId,
+      botId: params.botId,
+      status: 'processing',
+      provider: params.provider,
+      meetingUrl: params.meetingUrl,
+      startedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Update the status of the current job
+   */
+  updateStatus(status: BotStatus, statusMessage?: string): void {
+    if (this.currentJob) {
+      this.currentJob.status = status;
+      if (statusMessage) {
+        this.currentJob.statusMessage = statusMessage;
+      }
+      // Update timestamps based on status
+      if (status === 'joined' && !this.currentJob.joinedAt) {
+        this.currentJob.joinedAt = new Date().toISOString();
+      }
+      if (status === 'recording' && !this.currentJob.recordingStartedAt) {
+        this.currentJob.recordingStartedAt = new Date().toISOString();
+      }
+    }
+  }
+
+  /**
+   * Set participant count
+   */
+  setParticipantCount(count: number): void {
+    if (this.currentJob) {
+      this.currentJob.participantCount = count;
+    }
+  }
+
+  /**
+   * Set recording URL after upload
+   */
+  setRecordingUrl(url: string): void {
+    if (this.currentJob) {
+      this.currentJob.recordingUrl = url;
+    }
+  }
+
+  /**
+   * Set error information
+   */
+  setError(code: string, message: string): void {
+    if (this.currentJob) {
+      this.currentJob.error = { code, message };
+    }
+  }
+
+  /**
+   * Clear the current job state
+   */
+  clearJob(): void {
+    this.currentJob = null;
   }
 
   /**

@@ -1,6 +1,6 @@
 import { Frame, Page } from 'playwright';
 import { JoinParams, AbstractMeetBot } from './AbstractMeetBot';
-import { BotStatus, WaitPromise } from '../types';
+import { BotStatus, RecordingMetrics, WaitPromise } from '../types';
 import config from '../config';
 import { WaitingAtLobbyRetryError } from '../error';
 import { v4 } from 'uuid';
@@ -13,17 +13,22 @@ import { uploadDebugImage } from '../services/bugService';
 import { Logger } from 'winston';
 import { handleWaitingAtLobbyError } from './MeetBotBase';
 import { ZOOM_REQUEST_DENIED } from '../constants';
+import { WebhookService, createWebhookService } from '../services/webhookService';
 
 class BotBase extends AbstractMeetBot {
   protected page: Page;
   protected slightlySecretId: symbol; // Use any hard-to-guess identifier
   protected _logger: Logger;
   protected _correlationId: string;
+  protected _webhookService: WebhookService;
+  protected _recordingStartedAt?: string;
+
   constructor(logger: Logger, correlationId: string) {
     super();
     this.slightlySecretId = Symbol(v4());
     this._logger = logger;
     this._correlationId = correlationId;
+    this._webhookService = createWebhookService(logger);
   }
   join(params: JoinParams): Promise<void> {
     throw new Error('Function not implemented.');
@@ -44,6 +49,7 @@ export class ZoomBot extends BotBase {
       this._logger.info('Begin recording upload to server', { userId, teamId });
       const uploadResult = await uploader.uploadRecordingToRemoteStorage();
       this._logger.info('Recording upload result', { uploadResult, userId, teamId });
+      return uploadResult;
     };
     
     try {
@@ -52,13 +58,43 @@ export class ZoomBot extends BotBase {
       await patchBotStatus({ botId, eventId, provider: 'zoom', status: _state, token: bearerToken }, this._logger);
 
       // Finish the upload from the temp video
-      await handleUpload();
+      const uploadResult = await handleUpload();
+
+      if (uploadResult && uploadResult.success) {
+        // Send webhook: recording completed successfully
+        const recordingMetrics: RecordingMetrics = {
+          startedAt: this._recordingStartedAt || new Date().toISOString(),
+          stoppedAt: new Date().toISOString(),
+          format: 'webm',
+          hasAudio: true,
+          hasVideo: true,
+        };
+        await this._webhookService.sendCompleted(
+          botId || userId,
+          botId,
+          uploadResult.blobUrl || uploadResult.url,
+          recordingMetrics
+        );
+      }
     } catch(error) {
-      if (!_state.includes('finished')) 
+      if (!_state.includes('finished'))
         _state.push('failed');
 
       await patchBotStatus({ botId, eventId, provider: 'zoom', status: _state, token: bearerToken }, this._logger);
-      
+
+      // Send webhook: bot failed
+      const errorCode = error instanceof WaitingAtLobbyRetryError
+        ? 'LOBBY_TIMEOUT'
+        : 'UNKNOWN_ERROR';
+      const errorCategory = error instanceof WaitingAtLobbyRetryError
+        ? 'WaitingAtLobby'
+        : 'Platform';
+      await this._webhookService.sendFailed(botId || userId, {
+        code: errorCode,
+        message: error instanceof Error ? error.message : String(error),
+        category: errorCategory,
+      }, botId);
+
       if (error instanceof WaitingAtLobbyRetryError) {
         await handleWaitingAtLobbyError({ token: bearerToken, botId, eventId, provider: 'zoom', error }, this._logger);
       }
@@ -290,6 +326,10 @@ export class ZoomBot extends BotBase {
     const joinButton = await iframe.locator('button', { hasText: 'Join' });
     await joinButton.click();
 
+    // Send webhook: bot is now joining (waiting in lobby)
+    pushState('joining');
+    await this._webhookService.sendJoining(params.botId || params.userId, params.botId, url, 'zoom');
+
     // Wait in waiting room
     try {
       const wanderingTime = config.joinWaitTime * 60 * 1000; // Give some time to be let in
@@ -456,10 +496,19 @@ export class ZoomBot extends BotBase {
 
     pushState('joined');
 
+    // Send webhook: bot successfully joined the meeting
+    await this._webhookService.sendJoined(params.botId || params.userId, params.botId, undefined, 'zoom');
+
     // Recording the meeting page
     this._logger.info('Begin recording...');
+
+    // Send webhook: recording is starting
+    this._recordingStartedAt = new Date().toISOString();
+    pushState('recording');
+    await this._webhookService.sendRecordingStarted(params.botId || params.userId, params.botId, 'zoom');
+
     await this.recordMeetingPage({ ...params });
-    
+
     pushState('finished');
   }
 

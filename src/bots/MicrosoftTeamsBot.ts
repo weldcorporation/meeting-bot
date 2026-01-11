@@ -1,5 +1,5 @@
 import { JoinParams } from './AbstractMeetBot';
-import { BotStatus } from '../types';
+import { BotStatus, RecordingMetrics } from '../types';
 import config from '../config';
 import { WaitingAtLobbyRetryError } from '../error';
 import { handleWaitingAtLobbyError, MeetBotBase } from './MeetBotBase';
@@ -17,17 +17,22 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { WebhookService, createWebhookService } from '../services/webhookService';
 
 const execAsync = promisify(exec);
 
 export class MicrosoftTeamsBot extends MeetBotBase {
   private _logger: Logger;
   private _correlationId: string;
+  private _webhookService: WebhookService;
+  private _recordingStartedAt?: string;
+
   constructor(logger: Logger, correlationId: string) {
     super();
     this.slightlySecretId = v4();
     this._logger = logger;
     this._correlationId = correlationId;
+    this._webhookService = createWebhookService(logger);
   }
   async join({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, uploader }: JoinParams): Promise<void> {
     const _state: BotStatus[] = ['processing'];
@@ -46,13 +51,33 @@ export class MicrosoftTeamsBot extends MeetBotBase {
       // Finish the upload from the temp video
       const uploadResult = await handleUpload();
 
-      if (_state.includes('finished') && !uploadResult) {
+      if (_state.includes('finished') && (!uploadResult || !uploadResult.success)) {
         _state.splice(_state.indexOf('finished'), 1, 'failed');
         this._logger.error('Recording completed but upload failed', { botId, userId, teamId });
+        // Send webhook: upload failed
+        await this._webhookService.sendFailed(botId || userId, {
+          code: 'UPLOAD_FAILED',
+          message: 'Recording upload failed',
+          category: 'Recording',
+        }, botId);
         await patchBotStatus({ botId, eventId, provider: 'microsoft', status: _state, token: bearerToken }, this._logger);
         throw new Error('Recording upload failed');
-      } else if (uploadResult) {
+      } else if (uploadResult && uploadResult.success) {
         this._logger.info('Recording and upload completed successfully', { botId, userId, teamId });
+        // Send webhook: recording completed successfully
+        const recordingMetrics: RecordingMetrics = {
+          startedAt: this._recordingStartedAt || new Date().toISOString(),
+          stoppedAt: new Date().toISOString(),
+          format: 'mp4',
+          hasAudio: true,
+          hasVideo: true,
+        };
+        await this._webhookService.sendCompleted(
+          botId || userId,
+          botId,
+          uploadResult.blobUrl || uploadResult.url,
+          recordingMetrics
+        );
       }
 
       await patchBotStatus({ botId, eventId, provider: 'microsoft', status: _state, token: bearerToken }, this._logger);
@@ -69,6 +94,19 @@ export class MicrosoftTeamsBot extends MeetBotBase {
 
       if (!_state.includes('finished'))
         _state.push('failed');
+
+      // Send webhook: bot failed
+      const errorCode = error instanceof WaitingAtLobbyRetryError
+        ? 'LOBBY_TIMEOUT'
+        : 'UNKNOWN_ERROR';
+      const errorCategory = error instanceof WaitingAtLobbyRetryError
+        ? 'WaitingAtLobby'
+        : 'Platform';
+      await this._webhookService.sendFailed(botId || userId, {
+        code: errorCode,
+        message: error instanceof Error ? error.message : String(error),
+        category: errorCategory,
+      }, botId);
 
       // Try to update bot status (may fail if API is unreachable, but that's OK)
       await patchBotStatus({ botId, eventId, provider: 'microsoft', status: _state, token: bearerToken }, this._logger);
@@ -291,6 +329,10 @@ export class MicrosoftTeamsBot extends MeetBotBase {
       }
     );
 
+    // Send webhook: bot is now joining (waiting in lobby)
+    pushState('joining');
+    await this._webhookService.sendJoining(botId || userId, botId, url, 'microsoft');
+
     // Do this to ensure meeting bot has joined the meeting
     try {
       const wanderingTime = config.joinWaitTime * 60 * 1000; // Give some time to be let in
@@ -312,6 +354,9 @@ export class MicrosoftTeamsBot extends MeetBotBase {
     }
 
     pushState('joined');
+
+    // Send webhook: bot successfully joined the meeting
+    await this._webhookService.sendJoined(botId || userId, botId, undefined, 'microsoft');
 
     const dismissDeviceChecksAndNotifications = async () => {
       const notificationCheck = async () => {
@@ -392,6 +437,12 @@ export class MicrosoftTeamsBot extends MeetBotBase {
 
     // Recording the meeting page with ffmpeg
     this._logger.info('Begin recording with ffmpeg...');
+
+    // Send webhook: recording is starting
+    this._recordingStartedAt = new Date().toISOString();
+    pushState('recording');
+    await this._webhookService.sendRecordingStarted(botId || userId, botId, 'microsoft');
+
     await this.recordMeetingPageWithFFmpeg({ teamId, userId, eventId, botId, uploader });
 
     pushState('finished');

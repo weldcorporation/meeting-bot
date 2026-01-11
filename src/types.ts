@@ -121,7 +121,34 @@ export interface WaitPromise {
   promise: Promise<void>;
   resolveEarly: (value: void | PromiseLike<void>) => void;
 }
-export type BotStatus = 'processing' | 'joined' | 'finished' | 'failed';
+// Enhanced bot status with granular states for WeldSuite CRM integration
+export type BotStatus =
+  | 'processing'      // Initial state, browser launching
+  | 'joining'         // Clicked "Ask to join", waiting for admission
+  | 'joined'          // Successfully entered the meeting
+  | 'recording'       // MediaRecorder is active
+  | 'finished'        // Recording completed successfully
+  | 'failed'          // Error occurred
+  | 'left';           // Gracefully left the meeting
+
+// Meeting participant info for tracking
+export interface MeetingParticipant {
+  id?: string;
+  name: string;
+  joinedAt?: string;
+  leftAt?: string;
+}
+
+// Recording metrics for completed recordings
+export interface RecordingMetrics {
+  startedAt: string;
+  stoppedAt?: string;
+  duration?: number;        // seconds
+  fileSize?: number;        // bytes
+  format: string;           // 'webm', 'mp4'
+  hasAudio: boolean;
+  hasVideo: boolean;
+}
 export type WaitingAtLobbyCategory = {
   category: 'WaitingAtLobby',
   subCategory: 'Timeout' | 'StuckInLobby' | 'UserDeniedRequest',

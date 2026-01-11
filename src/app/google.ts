@@ -23,6 +23,7 @@ const joinGoogleMeet = async (req: Request, res: Response) => {
     botId
   }: MeetingJoinParams = req.body;
 
+  console.log('Received Google Meet join request', { userId, teamId, eventId, botId });
   // Validate required fields
   if (!bearerToken || !url || !name || !teamId || !timezone || !userId) {
     return res.status(400).json({

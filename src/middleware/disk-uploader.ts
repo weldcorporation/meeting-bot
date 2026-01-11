@@ -42,8 +42,14 @@ function isNoSuchUploadError(err: any, userId: string, logger: Logger): boolean 
   return isNoSuchUpload;
 }
 
+export interface UploadResult {
+  success: boolean;
+  blobUrl?: string;
+  url?: string;
+}
+
 export interface IUploader {
-  uploadRecordingToRemoteStorage(options?: { forceUpload?: boolean }): Promise<boolean>;
+  uploadRecordingToRemoteStorage(options?: { forceUpload?: boolean }): Promise<UploadResult | false>;
   saveDataToTempFile(data: Buffer): Promise<boolean>;
 }
 
@@ -666,7 +672,11 @@ class DiskUploader implements IUploader {
         }
       }
 
-      return uploadResult;
+      return {
+        success: uploadResult,
+        blobUrl: this.lastUploadedBlobUrl,
+        url: this.lastUploadedBlobUrl,
+      };
     } catch (err) {
       this._logger.info('Unable to upload recording to server...', { error: err, userId: this._userId, teamId: this._teamId });
       return false;

@@ -1,5 +1,5 @@
 import { JoinParams } from './AbstractMeetBot';
-import { BotStatus, WaitPromise } from '../types';
+import { BotStatus, RecordingMetrics, WaitPromise } from '../types';
 import config from '../config';
 import { UnsupportedMeetingError, WaitingAtLobbyRetryError } from '../error';
 import { patchBotStatus } from '../services/botService';
@@ -14,15 +14,20 @@ import { uploadDebugImage } from '../services/bugService';
 import createBrowserContext from '../lib/chromium';
 import { GOOGLE_LOBBY_MODE_HOST_TEXT, GOOGLE_REQUEST_DENIED, GOOGLE_REQUEST_TIMEOUT } from '../constants';
 import { vp9MimeType, webmMimeType } from '../lib/recording';
+import { WebhookService, createWebhookService } from '../services/webhookService';
 
 export class GoogleMeetBot extends MeetBotBase {
   private _logger: Logger;
   private _correlationId: string;
+  private _webhookService: WebhookService;
+  private _recordingStartedAt?: string;
+
   constructor(logger: Logger, correlationId: string) {
     super();
     this.slightlySecretId = v4();
     this._logger = logger;
     this._correlationId = correlationId;
+    this._webhookService = createWebhookService(logger);
   }
 
   async join({ url, name, bearerToken, teamId, timezone, userId, eventId, botId, uploader }: JoinParams): Promise<void> {
@@ -42,17 +47,55 @@ export class GoogleMeetBot extends MeetBotBase {
       // Finish the upload from the temp video
       const uploadResult = await handleUpload();
 
-      if (_state.includes('finished') && !uploadResult) {
+      if (_state.includes('finished') && (!uploadResult || !uploadResult.success)) {
         _state.splice(_state.indexOf('finished'), 1, 'failed');
+        // Send webhook: upload failed
+        await this._webhookService.sendFailed(botId || userId, {
+          code: 'UPLOAD_FAILED',
+          message: 'Failed to upload recording',
+          category: 'Recording',
+        }, botId);
+      } else if (uploadResult && uploadResult.success) {
+        // Send webhook: recording completed successfully
+        const recordingMetrics: RecordingMetrics = {
+          startedAt: this._recordingStartedAt || new Date().toISOString(),
+          stoppedAt: new Date().toISOString(),
+          format: 'webm',
+          hasAudio: true,
+          hasVideo: true,
+        };
+        await this._webhookService.sendCompleted(
+          botId || userId,
+          botId,
+          uploadResult.blobUrl || uploadResult.url,
+          recordingMetrics
+        );
       }
 
       await patchBotStatus({ botId, eventId, provider: 'google', status: _state, token: bearerToken }, this._logger);
     } catch(error) {
-      if (!_state.includes('finished')) 
+      if (!_state.includes('finished'))
         _state.push('failed');
 
       await patchBotStatus({ botId, eventId, provider: 'google', status: _state, token: bearerToken }, this._logger);
-      
+
+      // Send webhook: bot failed
+      const errorCode = error instanceof WaitingAtLobbyRetryError
+        ? 'LOBBY_TIMEOUT'
+        : error instanceof UnsupportedMeetingError
+          ? 'UNSUPPORTED_MEETING'
+          : 'UNKNOWN_ERROR';
+      const errorCategory = error instanceof WaitingAtLobbyRetryError
+        ? 'WaitingAtLobby'
+        : error instanceof UnsupportedMeetingError
+          ? 'UnsupportedMeeting'
+          : 'Platform';
+      await this._webhookService.sendFailed(botId || userId, {
+        code: errorCode,
+        message: error instanceof Error ? error.message : String(error),
+        category: errorCategory,
+      }, botId);
+
       if (error instanceof WaitingAtLobbyRetryError) {
         await handleWaitingAtLobbyError({ token: bearerToken, botId, eventId, provider: 'google', error }, this._logger);
       }
@@ -193,6 +236,10 @@ export class GoogleMeetBot extends MeetBotBase {
         await uploadDebugImage(await this.page.screenshot({ type: 'png', fullPage: true }), 'ask-to-join-button-click', userId, this._logger, botId);
       }
     );
+
+    // Send webhook: bot is now joining (waiting in lobby)
+    pushState('joining');
+    await this._webhookService.sendJoining(botId || userId, botId, url, 'google');
 
     // Do this to ensure meeting bot has joined the meeting
 
@@ -375,6 +422,9 @@ export class GoogleMeetBot extends MeetBotBase {
 
     pushState('joined');
 
+    // Send webhook: bot successfully joined the meeting
+    await this._webhookService.sendJoined(botId || userId, botId, undefined, 'google');
+
     try {
       this._logger.info('Waiting for the "Got it" button...');
       await this.page.waitForSelector('button:has-text("Got it")', { timeout: 15000 });
@@ -475,6 +525,12 @@ export class GoogleMeetBot extends MeetBotBase {
 
     // Recording the meeting page
     this._logger.info('Begin recording...');
+
+    // Send webhook: recording is starting
+    this._recordingStartedAt = new Date().toISOString();
+    pushState('recording');
+    await this._webhookService.sendRecordingStarted(botId || userId, botId, 'google');
+
     await this.recordMeetingPage({ teamId, eventId, userId, botId, uploader });
 
     pushState('finished');

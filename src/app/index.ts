@@ -26,10 +26,69 @@ app.get('/isbusy', async (req, res) => {
 
 app.get('/health', async (req, res) => {
   // Simple health check endpoint for Docker
-  return res.status(200).json({ 
-    status: 'healthy', 
+  return res.status(200).json({
+    status: 'healthy',
     timestamp: new Date().toISOString(),
     uptime: process.uptime()
+  });
+});
+
+// Get current bot status
+app.get('/status', async (req, res) => {
+  const currentJob = globalJobStore.getCurrentJob();
+
+  if (!currentJob) {
+    return res.status(200).json({
+      success: true,
+      status: 'idle',
+      statusMessage: 'No active session',
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    sessionId: currentJob.sessionId,
+    botId: currentJob.botId,
+    status: currentJob.status,
+    statusMessage: currentJob.statusMessage,
+    provider: currentJob.provider,
+    meetingUrl: currentJob.meetingUrl,
+    startedAt: currentJob.startedAt,
+    joinedAt: currentJob.joinedAt,
+    recordingStartedAt: currentJob.recordingStartedAt,
+    participantCount: currentJob.participantCount,
+    recordingUrl: currentJob.recordingUrl,
+    error: currentJob.error,
+  });
+});
+
+// Get status for a specific session
+app.get('/status/:sessionId', async (req, res) => {
+  const { sessionId } = req.params;
+  const currentJob = globalJobStore.getCurrentJob();
+
+  // Since we only run one session at a time, check if the current job matches
+  if (!currentJob || (currentJob.sessionId !== sessionId && currentJob.botId !== sessionId)) {
+    return res.status(404).json({
+      success: false,
+      error: 'Session not found',
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    sessionId: currentJob.sessionId,
+    botId: currentJob.botId,
+    status: currentJob.status,
+    statusMessage: currentJob.statusMessage,
+    provider: currentJob.provider,
+    meetingUrl: currentJob.meetingUrl,
+    startedAt: currentJob.startedAt,
+    joinedAt: currentJob.joinedAt,
+    recordingStartedAt: currentJob.recordingStartedAt,
+    participantCount: currentJob.participantCount,
+    recordingUrl: currentJob.recordingUrl,
+    error: currentJob.error,
   });
 });
 
